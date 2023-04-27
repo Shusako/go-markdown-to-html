@@ -2,11 +2,11 @@ package main
 
 import (
 	"encoding/json"
-	"io/fs"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/russross/blackfriday/v2"
@@ -19,9 +19,8 @@ func main() {
 	}
 
 	outputDir := "output"
-	// Create the output folder if it doesn't exist
-	if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
-		log.Fatalf("Error creating output directory: %v", err)
+	if err := clearOutputDirectory(outputDir); err != nil {
+		log.Fatalf("Error clearing output directory: %v", err)
 	}
 
 	if err := copyFile("template/styles.css", filepath.Join(outputDir, "styles.css")); err != nil {
@@ -86,37 +85,85 @@ func readTemplateFile(filename string) (string, error) {
 }
 
 func processMarkdownFiles(inputDir, outputDir, htmlTemplate string, generatedFiles *[]string) error {
-	err := filepath.Walk(inputDir, func(inputPath string, info fs.FileInfo, err error) error {
+	err := filepath.Walk(inputDir, func(inputPath string, file os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if !info.IsDir() && strings.HasSuffix(inputPath, ".md") {
-			relPath, err := filepath.Rel(inputDir, inputPath)
-			if err != nil {
-				return err
-			}
-
-			outputPath := filepath.Join(outputDir, strings.TrimSuffix(relPath, ".md")+".html")
-			outputDirPath := filepath.Dir(outputPath)
-
-			if err := os.MkdirAll(outputDirPath, os.ModePerm); err != nil {
-				return err
-			}
-
-			if err := convertMarkdownToHTML(inputPath, outputPath, htmlTemplate); err != nil {
-				return err
-			}
-
-			*generatedFiles = append(*generatedFiles, strings.TrimPrefix(outputPath, outputDir+"/"))
-
-			log.Printf("Processed %s -> %s", inputPath, outputPath)
+		if file.IsDir() {
+			return nil
 		}
+
+		if filepath.Ext(inputPath) != ".md" {
+			return nil
+		}
+
+		// Get the output directory path and create the directory if it doesn't exist
+		dir := filepath.Dir(inputPath)
+		outputDirPath := filepath.Join(outputDir, strings.TrimPrefix(dir, inputDir))
+		if err := os.MkdirAll(outputDirPath, os.ModePerm); err != nil {
+			return err
+		}
+
+		// Sanitize the file name and change the extension to .html
+		outputFile := sanitizeFileName(strings.TrimSuffix(file.Name(), filepath.Ext(file.Name()))) + ".html"
+		outputPath := filepath.Join(outputDir, strings.TrimPrefix(dir, inputDir), outputFile)
+
+		if err := convertMarkdownToHTML(inputPath, outputPath, htmlTemplate); err != nil {
+			return err
+		}
+
+		*generatedFiles = append(*generatedFiles, outputPath)
 
 		return nil
 	})
 
-	return err
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func clearOutputDirectory(outputDir string) error {
+	if _, err := os.Stat(outputDir); os.IsNotExist(err) {
+		// If the output directory does not exist, create it
+		return os.MkdirAll(outputDir, os.ModePerm)
+	}
+
+	// Delete all files and subdirectories within the output directory
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		path := filepath.Join(outputDir, entry.Name())
+		if entry.IsDir() {
+			if err := os.RemoveAll(path); err != nil {
+				return err
+			}
+		} else {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func sanitizeFileName(name string) string {
+	// Remove special characters and spaces
+	reg, err := regexp.Compile("[^a-zA-Z0-9 ]+")
+	if err != nil {
+		log.Fatalf("Error compiling regular expression: %v", err)
+	}
+	name = reg.ReplaceAllString(name, "")
+
+	// Convert to lowercase and replace spaces with underscores
+	name = strings.ReplaceAll(strings.ToLower(name), " ", "_")
+	return name
 }
 
 func convertMarkdownToHTML(inputPath, outputPath, htmlTemplate string) error {
